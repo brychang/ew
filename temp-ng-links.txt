@@ -1,0 +1,7 @@
+https://spelunker.cave-explorer.org/#!middleauth+https://global.daf-apis.com/nglstate/api/v1/5260495278833664
+wf AC with many BC ribbon synapses
+127.0.01:9000 layer is at data/annotations_ribbon_2026-03-19_11-42-43
+
+https://spelunker.cave-explorer.org/#!middleauth+https://global.daf-apis.com/nglstate/api/v1/5136762975289344
+same wf AC, no presynaptic SAC or RGC found yet
+

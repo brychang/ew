@@ -11,3 +11,10 @@ wheels/
 
 # Data directories
 data/
+snapshots/
+
+# Temporary scripts
+# temp*.*
+
+# DS_Store files
+.DS_Store
