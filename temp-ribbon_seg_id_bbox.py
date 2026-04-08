@@ -50,8 +50,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mesh-path",
         type=Path,
-        required=True,
-        help="Path to the target cell mesh used to build the skeleton.",
+        default=None,
+        help=(
+            "Path to the target cell mesh used to build the skeleton. "
+            "If not provided, will check data/meshes/{skeleton-seg-id}.obj and "
+            "download if needed."
+        ),
     )
     parser.add_argument(
         "--skeleton-seg-id",
@@ -66,9 +70,18 @@ def parse_args() -> argparse.Namespace:
         help="Only query seg ids for ribbons closer than this distance to skeleton.",
     )
     parser.add_argument(
+        "--bbox-extra-buffer-nm",
+        type=float,
+        default=2000.0,
+        help=(
+            "Extra safety margin added to bbox expansion in nm. "
+            "Effective bbox margin is max-distance-nm + bbox-extra-buffer-nm."
+        ),
+    )
+    parser.add_argument(
         "--distance-mode",
         choices=("centerline", "surface"),
-        default="centerline",
+        default="surface",
         help=(
             "Distance metric for skeleton.distance(). "
             "Use centerline to avoid surface-envelope clamping to 0."
@@ -118,6 +131,24 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_CV_PATH,
         help="CloudVolume segmentation path.",
     )
+    parser.add_argument(
+        "--mip",
+        type=int,
+        default=0,
+        help="CloudVolume mip level for lookup.",
+    )
+    parser.add_argument(
+        "--use-https",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable/disable HTTPS requests in CloudVolume.",
+    )
+    parser.add_argument(
+        "--format",
+        choices=("csv", "parquet"),
+        default="csv",
+        help="Chunk and final output table format.",
+    )
     return parser.parse_args()
 
 
@@ -134,12 +165,16 @@ def ensure_valid_args(args: argparse.Namespace) -> None:
         raise ValueError("--limit must be >= 1 when provided")
     if args.max_distance_nm <= 0:
         raise ValueError("--max-distance-nm must be > 0")
+    if args.bbox_extra_buffer_nm < 0:
+        raise ValueError("--bbox-extra-buffer-nm must be >= 0")
     if args.size_min >= args.size_max:
         raise ValueError("--size-min must be smaller than --size-max")
     if any(v <= 0 for v in args.voxel_size):
         raise ValueError("--voxel-size values must all be > 0")
-    if not args.mesh_path.exists():
-        raise FileNotFoundError(f"Mesh file does not exist: {args.mesh_path}")
+    if args.mesh_path is None and args.skeleton_seg_id is None:
+        raise ValueError(
+            "Either --mesh-path must be provided or --skeleton-seg-id must be set"
+        )
 
 
 def load_input_table(
@@ -177,6 +212,48 @@ def load_input_table(
     return result
 
 
+def resolve_and_prepare_mesh(
+    mesh_path: Path | None,
+    skeleton_seg_id: int | None,
+    cv_path: str,
+    use_https: bool,
+) -> Path:
+    """Resolve mesh path and download if needed.
+
+    If mesh_path is provided, use it.
+    Otherwise, construct path from skeleton_seg_id and download if missing.
+    """
+    if mesh_path is not None:
+        if not mesh_path.exists():
+            raise FileNotFoundError(f"Mesh file does not exist: {mesh_path}")
+        return mesh_path
+
+    # Use skeleton_seg_id to resolve path
+    if skeleton_seg_id is None:
+        raise ValueError(
+            "Cannot resolve mesh path without --mesh-path or --skeleton-seg-id"
+        )
+
+    mesh_dir = Path("data/meshes")
+    mesh_file = mesh_dir / f"{skeleton_seg_id}.obj"
+
+    if mesh_file.exists():
+        log(f"Using existing mesh: {mesh_file}")
+        return mesh_file
+
+    # Download mesh
+    log(f"Mesh not found at {mesh_file}, downloading...")
+    mesh_dir.mkdir(parents=True, exist_ok=True)
+    cv = CloudVolume(cv_path, use_https=use_https)
+    meshes = cv.mesh.get([skeleton_seg_id], fuse=False)
+    mesh = meshes[skeleton_seg_id]
+    obj_str = mesh.to_obj()
+    with open(mesh_file, "wb") as f:
+        f.write(obj_str)
+    log(f"Downloaded mesh to {mesh_file}")
+    return mesh_file
+
+
 def build_skeleton(mesh_path: Path, skeleton_seg_id: int | None):
     log(f"Loading mesh: {mesh_path}")
     mesh = sk.io.load_mesh(str(mesh_path))
@@ -191,6 +268,84 @@ def build_skeleton(mesh_path: Path, skeleton_seg_id: int | None):
         id=skeleton_seg_id,
         verbose=True,
     )
+
+
+def _as_xyz_array(data: object) -> np.ndarray | None:
+    arr = np.asarray(data)
+    if arr.ndim == 2 and arr.shape[0] > 0 and arr.shape[1] >= 3:
+        return arr[:, :3].astype(np.float64, copy=False)
+
+    if arr.ndim == 1 and len(arr) > 0 and hasattr(arr[0], "__dict__"):
+        rows: list[tuple[float, float, float]] = []
+        for item in arr:
+            if hasattr(item, "xyz"):
+                xyz = np.asarray(getattr(item, "xyz"), dtype=np.float64)
+                if xyz.shape[0] >= 3:
+                    rows.append((float(xyz[0]), float(xyz[1]), float(xyz[2])))
+                    continue
+            if all(hasattr(item, axis) for axis in ("x", "y", "z")):
+                rows.append((float(item.x), float(item.y), float(item.z)))
+        if rows:
+            return np.asarray(rows, dtype=np.float64)
+
+    if isinstance(data, dict) and all(k in data for k in ("x", "y", "z")):
+        x = np.asarray(data["x"], dtype=np.float64)
+        y = np.asarray(data["y"], dtype=np.float64)
+        z = np.asarray(data["z"], dtype=np.float64)
+        if len(x) == len(y) == len(z) and len(x) > 0:
+            return np.column_stack((x, y, z))
+
+    if all(hasattr(data, axis) for axis in ("x", "y", "z")):
+        x = np.asarray(getattr(data, "x"), dtype=np.float64)
+        y = np.asarray(getattr(data, "y"), dtype=np.float64)
+        z = np.asarray(getattr(data, "z"), dtype=np.float64)
+        if len(x) == len(y) == len(z) and len(x) > 0:
+            return np.column_stack((x, y, z))
+
+    return None
+
+
+def get_skeleton_points_nm(skeleton) -> np.ndarray:
+    for attr in ("vertices", "points", "coords", "coordinates", "nodes"):
+        if not hasattr(skeleton, attr):
+            continue
+        coords = _as_xyz_array(getattr(skeleton, attr))
+        if coords is not None and len(coords) > 0:
+            return coords
+
+    raise RuntimeError(
+        "Could not extract skeleton coordinates for bbox prefilter. "
+        "Expected one of attributes: vertices, points, coords, coordinates, nodes."
+    )
+
+
+def prefilter_with_skeleton_bbox(
+    df: pd.DataFrame,
+    skeleton,
+    voxel_size_nm: tuple[float, float, float],
+    max_distance_nm: float,
+    bbox_extra_buffer_nm: float,
+) -> pd.DataFrame:
+    voxel = np.asarray(voxel_size_nm, dtype=np.float64)
+    coords_nm = (
+        df[["centroid_x", "centroid_y", "centroid_z"]].to_numpy(dtype=np.float64)
+        * voxel
+    )
+
+    skeleton_nm = get_skeleton_points_nm(skeleton)
+    bbox_margin_nm = float(max_distance_nm) + float(bbox_extra_buffer_nm)
+    mins = skeleton_nm.min(axis=0) - bbox_margin_nm
+    maxs = skeleton_nm.max(axis=0) + bbox_margin_nm
+
+    mask = np.logical_and(coords_nm >= mins, coords_nm <= maxs).all(axis=1)
+    filtered = df.loc[mask].copy()
+    log(
+        "BBox prefilter kept "
+        f"{len(filtered)}/{len(df)} rows "
+        f"({(100.0 * len(filtered) / max(1, len(df))):.2f}%) "
+        f"with margin={bbox_margin_nm:.1f} nm"
+    )
+    return filtered
 
 
 def annotate_distance_to_skeleton(
@@ -398,6 +553,7 @@ def prepare_run_dirs(
 
 
 def main() -> None:
+    started = time.time()
     args = parse_args()
     ensure_valid_args(args)
 
@@ -408,46 +564,62 @@ def main() -> None:
         raise ValueError("No rows found in input table after filtering/limit")
 
     log(f"Rows after size filter: {total_rows}")
-    skeleton = build_skeleton(args.mesh_path, args.skeleton_seg_id)
-    input_df = annotate_distance_to_skeleton(
+    mesh_path = resolve_and_prepare_mesh(
+        args.mesh_path, args.skeleton_seg_id, args.cv_path, args.use_https
+    )
+    skeleton = build_skeleton(mesh_path, args.skeleton_seg_id)
+    bbox_df = prefilter_with_skeleton_bbox(
         input_df,
+        skeleton=skeleton,
+        voxel_size_nm=tuple(float(v) for v in args.voxel_size),
+        max_distance_nm=float(args.max_distance_nm),
+        bbox_extra_buffer_nm=float(args.bbox_extra_buffer_nm),
+    )
+    if bbox_df.empty:
+        raise ValueError(
+            "No rows remained after bbox prefilter; check mesh alignment and voxel size"
+        )
+
+    bbox_df = annotate_distance_to_skeleton(
+        bbox_df,
         skeleton=skeleton,
         voxel_size_nm=tuple(float(v) for v in args.voxel_size),
         distance_mode=args.distance_mode,
     )
-    near_df = input_df[
-        input_df["distance_to_skeleton_nm"] < args.max_distance_nm
-    ].copy()
+    near_df = bbox_df[bbox_df["distance_to_skeleton_nm"] < args.max_distance_nm].copy()
     if near_df.empty:
         raise ValueError(
             f"No rows within {args.max_distance_nm} nm of skeleton after filtering"
         )
-    log(f"Rows within {args.max_distance_nm:.1f} nm: {len(near_df)}/{len(input_df)}")
+    log(
+        f"Rows within {args.max_distance_nm:.1f} nm: {len(near_df)}/{len(bbox_df)} "
+        f"after bbox prefilter ({len(near_df)}/{len(input_df)} of initial rows)"
+    )
 
     task_count = math.ceil(len(near_df) / args.chunk_size)
     log(
         f"Prepared {len(near_df)} lookup rows, {task_count} chunks, "
-        f"workers={args.workers}, format=csv"
+        f"workers={args.workers}, format={args.format}"
     )
     tasks = build_tasks(near_df, args.chunk_size)
 
-    run_dir, chunk_dir, final_path = prepare_run_dirs(args.output_dir, "csv")
+    run_dir, chunk_dir, final_path = prepare_run_dirs(args.output_dir, args.format)
     log(f"Run directory: {run_dir}")
 
-    started = time.time()
+    print("Looking up supervoxel ids for ribbon centroids")
     chunk_paths = parallel_lookup(
         tasks=tasks,
         workers=args.workers,
         cv_path=args.cv_path,
-        mip=0,
-        use_https=True,
+        mip=args.mip,
+        use_https=args.use_https,
         chunk_dir=chunk_dir,
-        output_format="csv",
+        output_format=args.format,
     )
     merged = merge_chunks(
         chunk_paths=chunk_paths,
         total_input_rows=len(near_df),
-        output_format="csv",
+        output_format=args.format,
     )
 
     final_df = near_df.merge(
@@ -460,13 +632,13 @@ def main() -> None:
         raise RuntimeError("Merge produced missing segmentation_id values")
     final_df.sort_values("source_row", inplace=True, kind="mergesort")
     final_df.reset_index(drop=True, inplace=True)
-    write_table(final_df, final_path, "csv")
+    write_table(final_df, final_path, args.format)
 
     elapsed = time.time() - started
-    rate = len(final_df) / max(1e-6, elapsed)
     log(
-        f"Finished. Lookup rows={len(final_df)} elapsed={elapsed:.1f}s "
-        f"rate={rate:.1f} rows/s"
+        f"Finished in {elapsed:.1f} seconds; "
+        f"final rows: {len(final_df)}; "
+        f"rate: {len(final_df) / max(1e-6, elapsed):.1f} rows/s"
     )
     log(f"Final output: {final_path}")
 

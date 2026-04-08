@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import re
 import time
 from concurrent.futures import FIRST_EXCEPTION, ProcessPoolExecutor, wait
 from dataclasses import dataclass
@@ -31,9 +32,15 @@ class ChunkTask:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Parallel centroid-to-segmentation lookup for ribbon synapses with "
-            "chunked outputs and deterministic merge."
+            "Parallel centroid-to-segmentation lookup for ribbon synapses using "
+            "a list of target cell IDs."
         )
+    )
+    parser.add_argument(
+        "--cells-file",
+        type=Path,
+        default=Path("data/off_sac.txt"),
+        help="Text file containing target cell seg IDs (comma/newline/space separated).",
     )
     parser.add_argument(
         "--input",
@@ -48,31 +55,31 @@ def parse_args() -> argparse.Namespace:
         help="Directory for run outputs.",
     )
     parser.add_argument(
-        "--mesh-path",
+        "--mesh-dir",
         type=Path,
-        required=True,
-        help="Path to the target cell mesh used to build the skeleton.",
-    )
-    parser.add_argument(
-        "--skeleton-seg-id",
-        type=int,
-        default=None,
-        help="Optional seg id to store in skeleton metadata.",
+        default=Path("data/meshes"),
+        help="Directory containing {seg_id}.obj meshes (downloaded if missing).",
     )
     parser.add_argument(
         "--max-distance-nm",
         type=float,
         default=500.0,
-        help="Only query seg ids for ribbons closer than this distance to skeleton.",
+        help="Only keep ribbons closer than this distance to a cell skeleton.",
+    )
+    parser.add_argument(
+        "--bbox-extra-buffer-nm",
+        type=float,
+        default=2000.0,
+        help=(
+            "Extra safety margin added to bbox expansion in nm. "
+            "Effective bbox margin is max-distance-nm + bbox-extra-buffer-nm."
+        ),
     )
     parser.add_argument(
         "--distance-mode",
         choices=("centerline", "surface"),
-        default="centerline",
-        help=(
-            "Distance metric for skeleton.distance(). "
-            "Use centerline to avoid surface-envelope clamping to 0."
-        ),
+        default="surface",
+        help="Distance metric for skeleton.distance().",
     )
     parser.add_argument(
         "--size-min",
@@ -98,7 +105,7 @@ def parse_args() -> argparse.Namespace:
         "--workers",
         type=int,
         default=max(1, min(8, os.cpu_count() or 1)),
-        help="Number of process workers.",
+        help="Number of process workers for seg-id lookups.",
     )
     parser.add_argument(
         "--chunk-size",
@@ -113,10 +120,34 @@ def parse_args() -> argparse.Namespace:
         help="Optional row limit for smoke tests.",
     )
     parser.add_argument(
+        "--max-cells",
+        type=int,
+        default=None,
+        help="Optional cap on number of cell IDs loaded from --cells-file.",
+    )
+    parser.add_argument(
         "--cv-path",
         type=str,
         default=DEFAULT_CV_PATH,
         help="CloudVolume segmentation path.",
+    )
+    parser.add_argument(
+        "--mip",
+        type=int,
+        default=0,
+        help="CloudVolume mip level for lookup.",
+    )
+    parser.add_argument(
+        "--use-https",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable/disable HTTPS requests in CloudVolume.",
+    )
+    parser.add_argument(
+        "--format",
+        choices=("csv", "parquet"),
+        default="csv",
+        help="Chunk and final output table format.",
     )
     return parser.parse_args()
 
@@ -132,14 +163,42 @@ def ensure_valid_args(args: argparse.Namespace) -> None:
         raise ValueError("--chunk-size must be >= 1")
     if args.limit is not None and args.limit < 1:
         raise ValueError("--limit must be >= 1 when provided")
+    if args.max_cells is not None and args.max_cells < 1:
+        raise ValueError("--max-cells must be >= 1 when provided")
     if args.max_distance_nm <= 0:
         raise ValueError("--max-distance-nm must be > 0")
+    if args.bbox_extra_buffer_nm < 0:
+        raise ValueError("--bbox-extra-buffer-nm must be >= 0")
     if args.size_min >= args.size_max:
         raise ValueError("--size-min must be smaller than --size-max")
     if any(v <= 0 for v in args.voxel_size):
         raise ValueError("--voxel-size values must all be > 0")
-    if not args.mesh_path.exists():
-        raise FileNotFoundError(f"Mesh file does not exist: {args.mesh_path}")
+
+
+def load_cell_ids(path: Path, max_cells: int | None) -> list[int]:
+    if not path.exists():
+        raise FileNotFoundError(f"Cells file does not exist: {path}")
+
+    text = path.read_text(encoding="utf-8")
+    parts = re.split(r"[\s,]+", text.strip())
+
+    seen: set[int] = set()
+    ordered_ids: list[int] = []
+    for part in parts:
+        if not part:
+            continue
+        value = int(part)
+        if value in seen:
+            continue
+        seen.add(value)
+        ordered_ids.append(value)
+
+    if max_cells is not None:
+        ordered_ids = ordered_ids[:max_cells]
+
+    if not ordered_ids:
+        raise ValueError(f"No valid cell seg IDs found in {path}")
+    return ordered_ids
 
 
 def load_input_table(
@@ -167,20 +226,38 @@ def load_input_table(
         ["ribbon_id", "centroid_x", "centroid_y", "centroid_z", "size"]
     ].copy()
     for col in REQUIRED_COLUMNS:
-        result[col] = pd.to_numeric(result[col], errors="raise")
-
-    # CloudVolume indexing expects integer voxel coordinates.
-    for col in REQUIRED_COLUMNS:
-        result[col] = result[col].astype(np.int64)
+        result[col] = pd.to_numeric(result[col], errors="raise").astype(np.int64)
 
     result.insert(0, "source_row", np.arange(len(result), dtype=np.int64))
     return result
 
 
-def build_skeleton(mesh_path: Path, skeleton_seg_id: int | None):
-    log(f"Loading mesh: {mesh_path}")
+def resolve_mesh_path(
+    mesh_dir: Path,
+    skeleton_seg_id: int,
+    cv_path: str,
+    use_https: bool,
+) -> Path:
+    mesh_file = mesh_dir / f"{skeleton_seg_id}.obj"
+    if mesh_file.exists():
+        return mesh_file
+
+    log(f"Mesh not found at {mesh_file}, downloading")
+    mesh_dir.mkdir(parents=True, exist_ok=True)
+
+    cv = CloudVolume(cv_path, use_https=use_https)
+    meshes = cv.mesh.get([skeleton_seg_id], fuse=False)
+    mesh = meshes[skeleton_seg_id]
+    obj_data = mesh.to_obj()
+    if isinstance(obj_data, str):
+        mesh_file.write_text(obj_data, encoding="utf-8")
+    else:
+        mesh_file.write_bytes(obj_data)
+    return mesh_file
+
+
+def build_skeleton(mesh_path: Path, skeleton_seg_id: int):
     mesh = sk.io.load_mesh(str(mesh_path))
-    log("Skeletonizing mesh")
     return sk.skeletonize(
         mesh,
         detect_soma=True,
@@ -189,19 +266,69 @@ def build_skeleton(mesh_path: Path, skeleton_seg_id: int | None):
         prune_tiny_neurites=True,
         unit="nm",
         id=skeleton_seg_id,
-        verbose=True,
+        verbose=False,
     )
 
 
-def annotate_distance_to_skeleton(
-    df: pd.DataFrame,
+def _as_xyz_array(data: object) -> np.ndarray | None:
+    arr = np.asarray(data)
+    if arr.ndim == 2 and arr.shape[0] > 0 and arr.shape[1] >= 3:
+        return arr[:, :3].astype(np.float64, copy=False)
+
+    if arr.ndim == 1 and len(arr) > 0 and hasattr(arr[0], "__dict__"):
+        rows: list[tuple[float, float, float]] = []
+        for item in arr:
+            if hasattr(item, "xyz"):
+                xyz = np.asarray(getattr(item, "xyz"), dtype=np.float64)
+                if xyz.shape[0] >= 3:
+                    rows.append((float(xyz[0]), float(xyz[1]), float(xyz[2])))
+                    continue
+            if all(hasattr(item, axis) for axis in ("x", "y", "z")):
+                rows.append((float(item.x), float(item.y), float(item.z)))
+        if rows:
+            return np.asarray(rows, dtype=np.float64)
+
+    return None
+
+
+def get_skeleton_points_nm(skeleton) -> np.ndarray:
+    for attr in ("vertices", "points", "coords", "coordinates", "nodes"):
+        if not hasattr(skeleton, attr):
+            continue
+        coords = _as_xyz_array(getattr(skeleton, attr))
+        if coords is not None and len(coords) > 0:
+            return coords
+
+    raise RuntimeError(
+        "Could not extract skeleton coordinates for bbox prefilter. "
+        "Expected one of attributes: vertices, points, coords, coordinates, nodes."
+    )
+
+
+def annotate_near_ribbons_for_cell(
+    input_df: pd.DataFrame,
     skeleton,
     voxel_size_nm: tuple[float, float, float],
+    max_distance_nm: float,
+    bbox_extra_buffer_nm: float,
     distance_mode: str,
 ) -> pd.DataFrame:
-    out = df.copy()
     voxel = np.asarray(voxel_size_nm, dtype=np.float64)
-    coords = out[["centroid_x", "centroid_y", "centroid_z"]].to_numpy(dtype=np.float64)
+    coords_nm = (
+        input_df[["centroid_x", "centroid_y", "centroid_z"]].to_numpy(dtype=np.float64)
+        * voxel
+    )
+
+    skeleton_nm = get_skeleton_points_nm(skeleton)
+    bbox_margin_nm = float(max_distance_nm) + float(bbox_extra_buffer_nm)
+    mins = skeleton_nm.min(axis=0) - bbox_margin_nm
+    maxs = skeleton_nm.max(axis=0) + bbox_margin_nm
+
+    in_bbox_mask = np.logical_and(coords_nm >= mins, coords_nm <= maxs).all(axis=1)
+    bbox_df = input_df.loc[in_bbox_mask].copy()
+    if bbox_df.empty:
+        return bbox_df
+
     soma = getattr(skeleton, "soma", None)
     if soma is None or not hasattr(soma, "distance"):
         raise RuntimeError(
@@ -209,26 +336,28 @@ def annotate_distance_to_skeleton(
             "distance_to_sac_soma_nm"
         )
 
-    centerline_distances = np.empty(len(out), dtype=np.float64)
-    surface_distances = np.empty(len(out), dtype=np.float64)
-    soma_distances = np.empty(len(out), dtype=np.float64)
-    for i, point in enumerate(coords, start=1):
-        point_nm = point * voxel
-        centerline_distances[i - 1] = float(
-            skeleton.distance(point_nm, mode="centerline")
-        )
-        surface_distances[i - 1] = float(skeleton.distance(point_nm, mode="surface"))
-        soma_distances[i - 1] = float(soma.distance(point_nm))
-        if i % 5000 == 0 or i == len(out):
-            log(f"Distance progress: {i}/{len(out)}")
+    bbox_coords = bbox_df[["centroid_x", "centroid_y", "centroid_z"]].to_numpy(
+        dtype=np.float64
+    )
+    centerline_distances = np.empty(len(bbox_df), dtype=np.float64)
+    surface_distances = np.empty(len(bbox_df), dtype=np.float64)
+    soma_distances = np.empty(len(bbox_df), dtype=np.float64)
 
-    out["distance_to_skeleton_centerline_nm"] = centerline_distances
-    out["distance_to_skeleton_surface_nm"] = surface_distances
-    out["distance_to_skeleton_nm"] = (
+    for i, point in enumerate(bbox_coords):
+        point_nm = point * voxel
+        centerline_distances[i] = float(skeleton.distance(point_nm, mode="centerline"))
+        surface_distances[i] = float(skeleton.distance(point_nm, mode="surface"))
+        soma_distances[i] = float(soma.distance(point_nm))
+
+    bbox_df["distance_to_skeleton_centerline_nm"] = centerline_distances
+    bbox_df["distance_to_skeleton_surface_nm"] = surface_distances
+    bbox_df["distance_to_skeleton_nm"] = (
         centerline_distances if distance_mode == "centerline" else surface_distances
     )
-    out["distance_to_sac_soma_nm"] = soma_distances
-    return out
+    bbox_df["distance_to_sac_soma_nm"] = soma_distances
+
+    near_df = bbox_df[bbox_df["distance_to_skeleton_nm"] < max_distance_nm].copy()
+    return near_df
 
 
 def build_tasks(df: pd.DataFrame, chunk_size: int) -> list[ChunkTask]:
@@ -385,90 +514,134 @@ def merge_chunks(
 
 
 def prepare_run_dirs(
-    base_output_dir: Path, output_format: str
-) -> tuple[Path, Path, Path]:
+    base_output_dir: Path,
+    output_format: str,
+) -> tuple[Path, Path, Path, Path]:
     run_name = time.strftime("run_%Y%m%d_%H%M%S")
     run_dir = base_output_dir / run_name
     chunk_dir = run_dir / "chunks"
     run_dir.mkdir(parents=True, exist_ok=False)
     chunk_dir.mkdir(parents=True, exist_ok=False)
     ext = "csv" if output_format == "csv" else "parquet"
-    final_path = run_dir / f"ribbon_with_seg_ids.{ext}"
-    return run_dir, chunk_dir, final_path
+    final_path = run_dir / f"ribbon_with_seg_ids_cells.{ext}"
+    summary_path = run_dir / "cell_summary.csv"
+    return run_dir, chunk_dir, final_path, summary_path
 
 
 def main() -> None:
+    started = time.time()
     args = parse_args()
     ensure_valid_args(args)
 
-    log("Loading input table")
+    cell_ids = load_cell_ids(args.cells_file, args.max_cells)
+    log(f"Loaded {len(cell_ids)} cell IDs from {args.cells_file}")
+
     input_df = load_input_table(args.input, args.limit, args.size_min, args.size_max)
-    total_rows = len(input_df)
-    if total_rows == 0:
+    if input_df.empty:
         raise ValueError("No rows found in input table after filtering/limit")
+    log(f"Rows after size filter: {len(input_df)}")
 
-    log(f"Rows after size filter: {total_rows}")
-    skeleton = build_skeleton(args.mesh_path, args.skeleton_seg_id)
-    input_df = annotate_distance_to_skeleton(
-        input_df,
-        skeleton=skeleton,
-        voxel_size_nm=tuple(float(v) for v in args.voxel_size),
-        distance_mode=args.distance_mode,
-    )
-    near_df = input_df[
-        input_df["distance_to_skeleton_nm"] < args.max_distance_nm
-    ].copy()
-    if near_df.empty:
-        raise ValueError(
-            f"No rows within {args.max_distance_nm} nm of skeleton after filtering"
+    near_frames: list[pd.DataFrame] = []
+    for idx, cell_id in enumerate(cell_ids, start=1):
+        log(f"[{idx}/{len(cell_ids)}] Processing cell {cell_id}")
+        mesh_path = resolve_mesh_path(
+            args.mesh_dir, cell_id, args.cv_path, args.use_https
         )
-    log(f"Rows within {args.max_distance_nm:.1f} nm: {len(near_df)}/{len(input_df)}")
+        skeleton = build_skeleton(mesh_path, cell_id)
+        near_df = annotate_near_ribbons_for_cell(
+            input_df=input_df,
+            skeleton=skeleton,
+            voxel_size_nm=tuple(float(v) for v in args.voxel_size),
+            max_distance_nm=float(args.max_distance_nm),
+            bbox_extra_buffer_nm=float(args.bbox_extra_buffer_nm),
+            distance_mode=args.distance_mode,
+        )
+        if near_df.empty:
+            log(f"Cell {cell_id}: 0 rows within distance threshold")
+            continue
+        near_df.insert(1, "target_cell_id", int(cell_id))
+        near_frames.append(near_df)
+        log(f"Cell {cell_id}: kept {len(near_df)} rows")
 
-    task_count = math.ceil(len(near_df) / args.chunk_size)
-    log(
-        f"Prepared {len(near_df)} lookup rows, {task_count} chunks, "
-        f"workers={args.workers}, format=csv"
+    if not near_frames:
+        raise ValueError("No rows remained after processing all cell IDs")
+
+    all_near_df = pd.concat(near_frames, ignore_index=True)
+    all_near_df.drop_duplicates(subset=["target_cell_id", "source_row"], inplace=True)
+    all_near_df.sort_values(
+        ["target_cell_id", "source_row"], inplace=True, kind="mergesort"
     )
-    tasks = build_tasks(near_df, args.chunk_size)
+    all_near_df.reset_index(drop=True, inplace=True)
 
-    run_dir, chunk_dir, final_path = prepare_run_dirs(args.output_dir, "csv")
+    # Lookup seg IDs once per unique ribbon row, then join back to all cell matches.
+    lookup_df = all_near_df[
+        ["source_row", "ribbon_id", "centroid_x", "centroid_y", "centroid_z"]
+    ].drop_duplicates(subset=["source_row"])
+
+    task_count = math.ceil(len(lookup_df) / args.chunk_size)
+    log(
+        f"Prepared {len(all_near_df)} cell-ribbon matches and {len(lookup_df)} unique "
+        f"lookup rows in {task_count} chunks"
+    )
+    tasks = build_tasks(lookup_df, args.chunk_size)
+
+    run_dir, chunk_dir, final_path, summary_path = prepare_run_dirs(
+        args.output_dir, args.format
+    )
     log(f"Run directory: {run_dir}")
 
-    started = time.time()
     chunk_paths = parallel_lookup(
         tasks=tasks,
         workers=args.workers,
         cv_path=args.cv_path,
-        mip=0,
-        use_https=True,
+        mip=args.mip,
+        use_https=args.use_https,
         chunk_dir=chunk_dir,
-        output_format="csv",
+        output_format=args.format,
     )
     merged = merge_chunks(
         chunk_paths=chunk_paths,
-        total_input_rows=len(near_df),
-        output_format="csv",
+        total_input_rows=len(lookup_df),
+        output_format=args.format,
     )
 
-    final_df = near_df.merge(
+    final_df = all_near_df.merge(
         merged[["source_row", "segmentation_id"]],
         on="source_row",
         how="left",
-        validate="one_to_one",
+        validate="many_to_one",
     )
     if final_df["segmentation_id"].isna().any():
         raise RuntimeError("Merge produced missing segmentation_id values")
-    final_df.sort_values("source_row", inplace=True, kind="mergesort")
+
+    final_df.sort_values(
+        ["target_cell_id", "source_row"], inplace=True, kind="mergesort"
+    )
     final_df.reset_index(drop=True, inplace=True)
-    write_table(final_df, final_path, "csv")
+    write_table(final_df, final_path, args.format)
+
+    summary = (
+        final_df.groupby("target_cell_id", as_index=False)
+        .agg(
+            ribbon_matches=("source_row", "size"),
+            unique_ribbons=("ribbon_id", "nunique"),
+            unique_supervoxels=("segmentation_id", "nunique"),
+            min_distance_nm=("distance_to_skeleton_nm", "min"),
+            median_distance_nm=("distance_to_skeleton_nm", "median"),
+            max_distance_nm=("distance_to_skeleton_nm", "max"),
+        )
+        .sort_values("target_cell_id", kind="mergesort")
+        .reset_index(drop=True)
+    )
+    summary.to_csv(summary_path, index=False)
 
     elapsed = time.time() - started
-    rate = len(final_df) / max(1e-6, elapsed)
     log(
-        f"Finished. Lookup rows={len(final_df)} elapsed={elapsed:.1f}s "
-        f"rate={rate:.1f} rows/s"
+        f"Finished in {elapsed:.1f} seconds; final rows: {len(final_df)}; "
+        f"rate: {len(lookup_df) / max(1e-6, elapsed):.1f} lookup rows/s"
     )
     log(f"Final output: {final_path}")
+    log(f"Summary output: {summary_path}")
 
 
 if __name__ == "__main__":

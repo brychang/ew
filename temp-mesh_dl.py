@@ -7,7 +7,7 @@ from cloudvolume import CloudVolume
 # Configuration
 # -------------------------------------------------
 # EXTRAS = list(original_ids)
-EXTRAS = [720575940572159335]
+EXTRAS = [720575940563685101]
 
 CV_PATH = "graphene://middleauth+https://minnie.microns-daf.com/segmentation/table/stroeh_mouse_retina"
 d = time.strftime("%Y-%m-%d_%H-%M-%S")

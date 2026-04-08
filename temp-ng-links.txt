@@ -5,3 +5,42 @@ wf AC with many BC ribbon synapses
 https://spelunker.cave-explorer.org/#!middleauth+https://global.daf-apis.com/nglstate/api/v1/5136762975289344
 same wf AC, no presynaptic SAC or RGC found yet
 
+https://spelunker.cave-explorer.org/#!middleauth+https://global.daf-apis.com/nglstate/api/v1/4631762951995392
+3-conn
+
+https://spelunker.cave-explorer.org/#!middleauth+https://global.daf-apis.com/nglstate/api/v1/5938635600822272
+nNOS-2 in fig 1a
+
+https://spelunker.cave-explorer.org/#!middleauth+https://global.daf-apis.com/nglstate/api/v1/5306927046197248
+nNOS-2 in "All Cells"
+
+https://spelunker.cave-explorer.org/#!middleauth+https://global.daf-apis.com/nglstate/api/v1/5933814298705920
+
+
+720575940557940516, 720575940552419601, 720575940573955417
+https://spelunker.cave-explorer.org/#!middleauth+https://global.daf-apis.com/nglstate/api/v1/5199277583237120
+conventional synapse from 720575940557940516 (nNOS-2) to 720575940552419601 (ON-alpha)
+https://spelunker.cave-explorer.org/#!middleauth+https://global.daf-apis.com/nglstate/api/v1/4712265470181376
+ribbon synapse from 720575940573955417 (BC) to 720575940552419601 (ON-alpha)
+https://spelunker.cave-explorer.org/#!middleauth+https://global.daf-apis.com/nglstate/api/v1/4772947720929280
+ribbon synapse from 720575940573955417 (BC) to 720575940557940516 (nNOS-2)
+
+
+https://spelunker.cave-explorer.org/#!middleauth+https://global.daf-apis.com/nglstate/api/v1/4799055350726656
+
+https://spelunker.cave-explorer.org/#!middleauth+https://global.daf-apis.com/nglstate/api/v1/5282496869564416
+
+https://spelunker.cave-explorer.org/#!middleauth+https://global.daf-apis.com/nglstate/api/v1/6400662748266496
+blue: bc to nNOS-2
+https://spelunker.cave-explorer.org/#!middleauth+https://global.daf-apis.com/nglstate/api/v1/5115009922236416
+red: nNOS-2 to rgc
+https://spelunker.cave-explorer.org/#!middleauth+https://global.daf-apis.com/nglstate/api/v1/6153846681239552
+yellow: bc to rgc
+
+https://spelunker.cave-explorer.org/#!middleauth+https://global.daf-apis.com/nglstate/api/v1/5458411079598080
+https://spelunker.cave-explorer.org/#!middleauth+https://global.daf-apis.com/nglstate/api/v1/4827470854356992
+https://spelunker.cave-explorer.org/#!middleauth+https://global.daf-apis.com/nglstate/api/v1/5358875480948736
+
+https://spelunker.cave-explorer.org/#!middleauth+https://global.daf-apis.com/nglstate/api/v1/6430541862666240
+vertical 3d view, z aligned
+

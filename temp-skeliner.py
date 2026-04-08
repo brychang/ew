@@ -116,3 +116,5 @@ for i, row in tqdm(filtered_df.iterrows(), total=len(filtered_df)):
 # Make a copy of the filtered dataframe before setting the new column to avoid the SettingWithCopyWarning
 filtered_df = filtered_df.copy()
 filtered_df["segmentation_id"] = seg_ids
+
+# %%

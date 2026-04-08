@@ -5,7 +5,7 @@ from pathlib import Path
 import requests
 
 # %%
-segid = 720575940574792758
+segid = 720575940573955417
 url = f"https://codex-mouse.pniapps.org/ew2/download_skeleton_assets?segid={segid}"
 
 # output paths

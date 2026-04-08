@@ -17,7 +17,7 @@ spacing = np.array(vol.scale["resolution"])
 # -------------------------------------------------
 
 # --- Load SWCs to compute centers (same as reference script)
-NEURON_IDS = ["720575940585312278", "720575940557127939", "720575940574792758"]
+NEURON_IDS = [720575940557940516, 720575940552419601, 720575940573955417]
 SWC_PATHS = [f"data/skeletons/{id}.swc" for id in NEURON_IDS]
 
 skeletons = []
@@ -29,16 +29,16 @@ for swc_path in SWC_PATHS:
 # Compute centers
 centers = [xyz.mean(axis=0) for xyz in skeletons]
 
-# Match reference script: RGC = index 1
-rgc_center = centers[1]
+# Center to RGC
+field_center = centers[1]
 
 # --- Construct e2198 box (350 µm × 350 µm)
 box_um = np.array(
     [
-        [rgc_center[0] - 175, rgc_center[1] - 175],
-        [rgc_center[0] + 175, rgc_center[1] - 175],
-        [rgc_center[0] + 175, rgc_center[1] + 175],
-        [rgc_center[0] - 175, rgc_center[1] + 175],
+        [field_center[0] - 175, field_center[1] - 175],
+        [field_center[0] + 175, field_center[1] - 175],
+        [field_center[0] + 175, field_center[1] + 175],
+        [field_center[0] - 175, field_center[1] + 175],
     ]
 )
 
@@ -53,6 +53,12 @@ x1 = int(np.ceil(xmax))
 y0 = int(np.floor(ymin))
 y1 = int(np.ceil(ymax))
 
+# This should center at field_center and be 350 µm across in x and y.
+# But I get an out of bounds error when trying to download the planes, so I need to adjust the box a bit.
+# Let's just keep the original z range and adjust x and y to fit within bounds.
+x0, x1 = np.clip([x0, x1], 0, vol.shape[0])
+y0, y1 = np.clip([y0, y1], 0, vol.shape[1])
+
 # keep your original z range
 z0 = 1
 z1 = 2064
@@ -60,6 +66,18 @@ z1 = 2064
 z_face = vol.download(Bbox((x0, y0, z1 - 1), (x1, y1, z1))).squeeze()
 y_face = vol.download(Bbox((x0, y1 - 1, z0), (x1, y1, z1))).squeeze()
 x_face = vol.download(Bbox((x1 - 1, y0, z0), (x1, y1, z1))).squeeze()
+
+bbox = (x0, x1, y0, y1, z0, z1)
+
+# convert voxel bbox → physical (nm)
+bbox_phys = (
+    x0 * spacing[0],
+    x1 * spacing[0],
+    y0 * spacing[1],
+    y1 * spacing[1],
+    z0 * spacing[2],
+    z1 * spacing[2],
+)
 
 
 # -------------------------------------------------
@@ -92,7 +110,7 @@ plane_x = make_plane(x_face, (x1 - 1, y0, z0), "x")
 # -------------------------------------------------
 # 4. Load meshes and keep IDs
 # -------------------------------------------------
-mesh_dir = Path("data/meshes_2026-03-25_11-00-31")
+mesh_dir = Path("data/meshes_2026-04-06_12-13-37")
 
 mesh_files = sorted(f for f in mesh_dir.glob("*.obj") if f.stem.isdigit())
 
@@ -121,7 +139,8 @@ p.add_mesh(plane_x, cmap="gray", clim=[0, 1], show_scalar_bar=False)
 actors = []
 colors = ["#0072B2", "#D55E00", "#009E73"]
 for mesh, color in zip(meshes, colors):
-    actor = p.add_mesh(mesh, color=color, opacity=0.5)
+    clipped = mesh.clip_box(bounds=bbox_phys, invert=False)
+    actor = p.add_mesh(clipped, color=color, opacity=0.5)
     actors.append(actor)
 
 
@@ -178,18 +197,16 @@ else:
     Path("snapshots").mkdir(exist_ok=True)
 
     # Combine all meshes bounds + planes
-    all_bounds = np.array(
-        [plane_x.bounds, plane_y.bounds, plane_z.bounds]
-        + [mesh.bounds for mesh in meshes]
+    bbox_center = [
+        (bbox_phys[0] + bbox_phys[1]) / 2,
+        (bbox_phys[2] + bbox_phys[3]) / 2,
+        (bbox_phys[4] + bbox_phys[5]) / 2,
+    ]
+    bbox_size = max(
+        bbox_phys[1] - bbox_phys[0],
+        bbox_phys[3] - bbox_phys[2],
+        bbox_phys[5] - bbox_phys[4],
     )
-    xmin = all_bounds[:, 0].min()
-    xmax = all_bounds[:, 1].max()
-    ymin = all_bounds[:, 2].min()
-    ymax = all_bounds[:, 3].max()
-    zmin = all_bounds[:, 4].min()
-    zmax = all_bounds[:, 5].max()
-    bbox_center = [(xmin + xmax) / 2, (ymin + ymax) / 2, (zmin + zmax) / 2]
-    bbox_size = max(xmax - xmin, ymax - ymin, zmax - zmin)
 
     # Use a higher-resolution off-screen plotter
     p = pv.Plotter(off_screen=True, window_size=(2048, 2048))
@@ -199,7 +216,8 @@ else:
     p.add_mesh(plane_y, cmap="gray", clim=[0, 1], show_scalar_bar=False)
     p.add_mesh(plane_x, cmap="gray", clim=[0, 1], show_scalar_bar=False)
     for mesh, color in zip(meshes, colors):
-        actor = p.add_mesh(mesh, color=color, opacity=0.5)
+        clipped = mesh.clip_box(bounds=bbox_phys, invert=False)
+        actor = p.add_mesh(clipped, color=color, opacity=0.5)
 
     # Orthographic camera
     p.camera.parallel_projection = True
@@ -207,6 +225,10 @@ else:
     directions = {
         "neg_x": ([-1, 0, 0], [0, 0, 1]),
         "neg_z": ([0, 0, -1], [0, 1, 0]),
+        "neg_y": ([0, -1, 0], [0, 0, 1]),
+        "pos_x": ([1, 0, 0], [0, 0, 1]),
+        "pos_z": ([0, 0, 1], [0, 1, 0]),
+        "pos_y": ([0, 1, 0], [0, 0, 1]),
     }
 
     distance = bbox_size * 1.2

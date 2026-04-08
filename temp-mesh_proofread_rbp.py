@@ -14,12 +14,12 @@ import pyvista as pv
 # B = pv.read("data/t5o_pfd/720575940562643603.obj")
 
 # nnos2 03-25
-# A = pv.read("data/meshes_2026-03-25_14-45-12/720575940568658329.obj")
-# B = pv.read("data/meshes_2026-03-25_11-00-31/720575940585312278.obj")
+A = pv.read("data/meshes_2026-03-25_14-45-12/720575940568658329.obj")
+B = pv.read("data/meshes_2026-03-25_11-00-31/720575940585312278.obj")
 
 # rgc 03-25
-A = pv.read("data/meshes_2026-03-25_14-45-12/720575940575255862.obj")
-B = pv.read("data/meshes_2026-03-25_11-00-31/720575940557127939.obj")
+# A = pv.read("data/meshes_2026-03-25_14-45-12/720575940575255862.obj")
+# B = pv.read("data/meshes_2026-03-25_11-00-31/720575940557127939.obj")
 
 # bc 03-25
 # A = pv.read("data/meshes_2026-03-25_11-00-31/720575940574792758.obj")
@@ -33,7 +33,8 @@ p = pv.Plotter()
 
 # individual neurons
 p.add_mesh(A, color="red", opacity=0.5)
-p.add_mesh(B, color="blue", opacity=0.5)
+# light green
+p.add_mesh(B, color="lightgreen", opacity=0.5)
 
 
 p.show()

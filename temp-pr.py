@@ -5,7 +5,7 @@ from caveclient import CAVEclient
 # Config
 # -------------------------------------------------
 DATASET = "stroeh_mouse_retina"
-AFTER_ROOT_ID = 720575940585312278
+AFTER_ROOT_ID = 720575940557940516
 
 # -------------------------------------------------
 # Initialize client

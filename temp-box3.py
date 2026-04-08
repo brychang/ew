@@ -6,7 +6,8 @@ from cloudvolume import CloudVolume
 # Configuration
 # ─────────────────────────────────────────────────────────────
 # NEURON_IDS = ["720575940568708429", "720575940553314647", "720575940562643603"]
-NEURON_IDS = ["720575940585312278", "720575940557127939", "720575940574792758"]
+# NEURON_IDS = ["720575940585312278", "720575940557127939", "720575940574792758"]
+NEURON_IDS = [720575940552419601, 720575940557940516, 720575940573955417]
 SWC_PATHS = [f"data/skeletons/{id}.swc" for id in NEURON_IDS]
 
 SCALE_BAR_UM = 150.0
@@ -111,7 +112,7 @@ ax.plot(e2006_box[:, 0], e2006_box[:, 1], color="gray", linewidth=2)
 ax.plot(e2198_box[:, 0], e2198_box[:, 1], color="cyan", linewidth=2)
 
 # Scale bar
-margin = 40  # µm padding from edges
+margin = 300  # µm padding from edges
 
 x0 = x_size - SCALE_BAR_UM - margin
 y0 = y_size - margin
