@@ -18,16 +18,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--ribbon-csv",
         type=Path,
-        default=Path(
-            "data/ribbon_seg_id_runs/run_20260328_125747/ribbon_with_seg_ids.csv"
-        ),
+        default=Path("data/ribbon_seg_id_runs/hd2/ribbon_with_seg_ids_cells.csv"),
         help="Path to ribbon_with_seg_ids.csv.",
     )
     parser.add_argument(
         "--ewii-csv",
         type=Path,
-        default=Path("data/ewii_bc_20260330.csv"),
-        help="Path to ewii_bc_20260330.csv.",
+        default=Path("data/ewii_csv/ewii_bcs_20260430.csv"),
+        help="Path to bipolar cells csv.",
     )
     parser.add_argument(
         "--seg-id-column",

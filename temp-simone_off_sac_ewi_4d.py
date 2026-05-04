@@ -387,6 +387,61 @@ tree = cKDTree(xyz)
 # Precompute geodesic distance (in um) from soma/root to every skeleton node.
 dist_to_root_um = nx.single_source_dijkstra_path_length(G, root_node, weight="weight")
 
+_DEFAULT_TARGET_CELL_ID = 720575940567969903
+_flatone_geodesic_context_cache = {
+    _DEFAULT_TARGET_CELL_ID: {
+        "xyz": xyz,
+        "dist_to_root_um": dist_to_root_um,
+        "tree_2d": cKDTree(xyz[:, :2]),
+    }
+}
+
+
+def _load_flatone_geodesic_context(target_cell_id: int):
+    target_cell_id = int(target_cell_id)
+    cached = _flatone_geodesic_context_cache.get(target_cell_id)
+    if cached is not None:
+        return cached
+
+    sac_flatone_path = Path(
+        f"~/flatone/output/{target_cell_id}/skeleton_warped.swc"
+    ).expanduser()
+    if not sac_flatone_path.exists():
+        raise FileNotFoundError(
+            f"Missing flatone skeleton for target_cell_id={target_cell_id}: {sac_flatone_path}"
+        )
+
+    sac_data = np.loadtxt(sac_flatone_path, comments="#")
+    sac_ids = sac_data[:, 0].astype(int)
+    sac_xyz = sac_data[:, 2:5]
+    sac_parents = sac_data[:, 6].astype(int)
+    sac_id_to_idx = {nid: i for i, nid in enumerate(sac_ids)}
+
+    sac_edges = []
+    for i, p in enumerate(sac_parents):
+        if p == -1:
+            continue
+        if p in sac_id_to_idx:
+            sac_edges.append((i, sac_id_to_idx[p]))
+
+    sac_root_node = np.where(sac_parents == -1)[0][0]
+    sac_graph = nx.Graph()
+    for i, j in sac_edges:
+        dist = np.linalg.norm(sac_xyz[i] - sac_xyz[j])
+        sac_graph.add_edge(i, j, weight=dist)
+
+    sac_dist_to_root_um = nx.single_source_dijkstra_path_length(
+        sac_graph, sac_root_node, weight="weight"
+    )
+
+    context = {
+        "xyz": sac_xyz,
+        "dist_to_root_um": sac_dist_to_root_um,
+        "tree_2d": cKDTree(sac_xyz[:, :2]),
+    }
+    _flatone_geodesic_context_cache[target_cell_id] = context
+    return context
+
 
 def compute_geodesic_distance_um(point_um):
     _, idx = tree.query(point_um)
@@ -401,8 +456,8 @@ plt.figure(figsize=(10, 6))
 bins = np.arange(0, pred_df["distance_to_soma_geodesic_um"].max() + 10, 10)
 bin_centers = (bins[:-1] + bins[1:]) / 2
 for cell_type, group in pred_df.groupby("Cell Type (machine)"):
-    if cell_type in ["GluMI", "t5t"]:
-        continue
+    # if cell_type in ["GluMI", "t5t"]:
+    #     continue
     counts, _ = np.histogram(group["distance_to_soma_geodesic_um"], bins=bins)
     plt.plot(
         bin_centers, counts, marker="o", label=cell_type, color=colors.get(cell_type)
@@ -416,12 +471,12 @@ plt.show()
 
 # The previous was good but we don't actually want to use the z coordinate of the synapse since the flatone skeleton is flattened in z. We should only use the x and y coordinates of the synapse to compute the distance to the skeleton.
 # We can modify the compute_geodesic_distance_um function to ignore the z coordinate when querying the tree and computing the distance.
-def compute_geodesic_distance_um_ignore_z(point_um):
-    point_2d = point_um[:2]  # Ignore z coordinate
-    skeleton_2d = xyz[:, :2]  # Use only x and y coordinates of the skeleton
-    tree_2d = cKDTree(skeleton_2d)
-    _, idx = tree_2d.query(point_2d)
-    return dist_to_root_um.get(idx, np.nan)
+def compute_geodesic_distance_um_ignore_z(
+    point_um, target_cell_id: int = _DEFAULT_TARGET_CELL_ID
+):
+    context = _load_flatone_geodesic_context(target_cell_id)
+    _, idx = context["tree_2d"].query(np.asarray(point_um)[:2])
+    return context["dist_to_root_um"].get(idx, np.nan)
 
 
 pred_df["distance_to_soma_geodesic_ignore_z_um"] = pred_df["centroid_parsed_um"].apply(
@@ -432,8 +487,8 @@ plt.figure(figsize=(10, 6))
 bins = np.arange(0, pred_df["distance_to_soma_geodesic_ignore_z_um"].max() + 10, 10)
 bin_centers = (bins[:-1] + bins[1:]) / 2
 for cell_type, group in pred_df.groupby("Cell Type (machine)"):
-    if cell_type in ["GluMI", "t5t"]:
-        continue
+    # if cell_type in ["GluMI", "t5t"]:
+    #     continue
     counts, _ = np.histogram(group["distance_to_soma_geodesic_ignore_z_um"], bins=bins)
     plt.plot(
         bin_centers, counts, marker="o", label=cell_type, color=colors.get(cell_type)
@@ -460,8 +515,8 @@ plt.figure(figsize=(10, 6))
 bins = np.arange(0, df["distance_to_soma_geodesic_ignore_z_um"].max() + 10, 10)
 bin_centers = (bins[:-1] + bins[1:]) / 2
 for cell_type, group in df.groupby("cell_type"):
-    if cell_type in ["GluMI", "t5t"]:
-        continue
+    # if cell_type in ["GluMI", "t5t"]:
+    #     continue
     counts, _ = np.histogram(group["distance_to_soma_geodesic_ignore_z_um"], bins=bins)
     plt.plot(
         bin_centers, counts, marker="o", label=cell_type, color=colors.get(cell_type)
@@ -493,4 +548,3 @@ print(unique_cells)
 unique_cells_human = pred_df.groupby("Cell Type")["final_seg_id"].nunique()
 print("Unique cell counts (human labeled) in pred_df:")
 print(unique_cells_human)
-# %%

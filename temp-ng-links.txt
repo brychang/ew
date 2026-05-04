@@ -44,3 +44,5 @@ https://spelunker.cave-explorer.org/#!middleauth+https://global.daf-apis.com/ngl
 https://spelunker.cave-explorer.org/#!middleauth+https://global.daf-apis.com/nglstate/api/v1/6430541862666240
 vertical 3d view, z aligned
 
+in progress synapse inspection
+https://spelunker.cave-explorer.org/#!middleauth+https://global.daf-apis.com/nglstate/api/v1/5030251024351232
